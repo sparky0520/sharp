@@ -229,11 +229,17 @@ async fn transcribe_audio(file_path: String) -> Result<String, String> {
     Ok(text)
 }
 
-// --- GPT Integration ---
+// --- GPT Integration (Streaming) ---
 
 #[tauri::command]
-async fn ask_gpt(screenshot_path: String, transcript: String) -> Result<String, String> {
+async fn ask_gpt_stream(
+    app: tauri::AppHandle,
+    screenshot_path: String,
+    transcript: String,
+) -> Result<(), String> {
     use base64::{Engine as _, engine::general_purpose};
+    use futures_util::StreamExt;
+    use tauri::Emitter;
 
     let api_key = std::env::var("OPENAI_API_KEY")
         .map_err(|_| "OPENAI_API_KEY environment variable not set".to_string())?;
@@ -258,7 +264,8 @@ async fn ask_gpt(screenshot_path: String, transcript: String) -> Result<String, 
                 }
             ]
         }],
-        "max_tokens": 1024
+        "max_tokens": 1024,
+        "stream": true
     });
 
     let client = reqwest::Client::new();
@@ -276,17 +283,33 @@ async fn ask_gpt(screenshot_path: String, transcript: String) -> Result<String, 
         return Err(format!("GPT API error ({}): {}", status, body));
     }
 
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
 
-    let text = json["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or("No content in API response")?
-        .to_string();
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| format!("Stream error: {}", e))?;
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
 
-    Ok(text)
+        while let Some(pos) = buffer.find('\n') {
+            let line = buffer[..pos].trim_end_matches('\r').to_string();
+            buffer = buffer[pos + 1..].to_string();
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    return Ok(());
+                }
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                        if !content.is_empty() {
+                            app.emit("gpt-token", content).ok();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -297,7 +320,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(RecorderState(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![greet, capture_screen, start_recording, stop_recording, transcribe_audio, ask_gpt])
+        .invoke_handler(tauri::generate_handler![greet, capture_screen, start_recording, stop_recording, transcribe_audio, ask_gpt_stream])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

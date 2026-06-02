@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import { register, unregisterAll } from '@tauri-apps/plugin-global-shortcut';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import './App.css';
 
 function App() {
@@ -53,18 +54,20 @@ function App() {
 
   const askGpt = async () => {
     if (!screenshotPath || !transcript) return;
+    setError(null);
+    setIsAsking(true);
+    setGptResponse(null);
+
+    const tokenUnlisten = await listen<string>('gpt-token', (event) => {
+      setGptResponse(prev => (prev ?? '') + event.payload);
+    });
+
     try {
-      setError(null);
-      setIsAsking(true);
-      setGptResponse(null);
-      const response = await invoke<string>('ask_gpt', {
-        screenshotPath,
-        transcript,
-      });
-      setGptResponse(response);
+      await invoke('ask_gpt_stream', { screenshotPath, transcript });
     } catch (e: any) {
       setError('GPT request failed: ' + e.toString());
     } finally {
+      tokenUnlisten();
       setIsAsking(false);
     }
   };
