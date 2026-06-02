@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { register, unregisterAll } from '@tauri-apps/plugin-global-shortcut';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
@@ -8,6 +8,10 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [screenshotPath, setScreenshotPath] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingPath, setRecordingPath] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const dismissWindow = async () => {
     try {
@@ -23,15 +27,15 @@ function App() {
       setError(null);
       setIsCapturing(true);
       setScreenshotPath(null);
-      
+
       const appWindow = getCurrentWindow();
       await appWindow.hide();
-      
+
       await new Promise(resolve => setTimeout(resolve, 200));
-      
+
       const path = await invoke<string>('capture_screen');
       setScreenshotPath(path);
-      
+
       await appWindow.show();
       await appWindow.setFocus();
     } catch (e: any) {
@@ -41,6 +45,46 @@ function App() {
     } finally {
       setIsCapturing(false);
     }
+  };
+
+  const toggleRecording = async () => {
+    if (isRecording) {
+      // Stop recording
+      try {
+        setError(null);
+        const path = await invoke<string>('stop_recording');
+        setRecordingPath(path);
+      } catch (e: any) {
+        setError('Stop recording failed: ' + e.toString());
+      } finally {
+        setIsRecording(false);
+        setElapsed(0);
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+      }
+    } else {
+      // Start recording
+      try {
+        setError(null);
+        setRecordingPath(null);
+        await invoke<string>('start_recording');
+        setIsRecording(true);
+        setElapsed(0);
+        timerRef.current = setInterval(() => {
+          setElapsed(prev => prev + 1);
+        }, 1000);
+      } catch (e: any) {
+        setError('Start recording failed: ' + e.toString());
+      }
+    }
+  };
+
+  const formatTime = (seconds: number): string => {
+    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+    const s = (seconds % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
   };
 
   useEffect(() => {
@@ -72,6 +116,9 @@ function App() {
 
     return () => {
       unregisterAll().catch(e => console.error(e));
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
     };
   }, []);
 
@@ -90,10 +137,23 @@ function App() {
       <h1>GlideWin Assistant</h1>
       <p>I am your desktop AI companion.</p>
       <p>Press <code>Ctrl+Shift+Space</code> globally to toggle this window.</p>
-      
-      <div style={{ margin: '1rem 0', display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+
+      <div style={{ margin: '1rem 0', display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
         <button onClick={takeScreenshot} disabled={isCapturing}>
           {isCapturing ? 'Capturing...' : 'Capture Screen'}
+        </button>
+        <button
+          className={isRecording ? 'recording-btn' : ''}
+          onClick={toggleRecording}
+        >
+          {isRecording ? (
+            <>
+              <span className="recording-dot" />
+              Stop {formatTime(elapsed)}
+            </>
+          ) : (
+            'Record'
+          )}
         </button>
         <button onClick={dismissWindow}>Dismiss (Esc)</button>
       </div>
@@ -102,6 +162,13 @@ function App() {
         <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: '#333', borderRadius: '8px', color: 'white' }}>
           <strong>Screenshot saved to:</strong><br />
           <code style={{ wordBreak: 'break-all' }}>{screenshotPath}</code>
+        </div>
+      )}
+
+      {recordingPath && (
+        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: '#1a3a1a', borderRadius: '8px', color: '#7fff7f' }}>
+          <strong>Recording saved to:</strong><br />
+          <code style={{ wordBreak: 'break-all' }}>{recordingPath}</code>
         </div>
       )}
 
