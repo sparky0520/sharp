@@ -466,6 +466,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(RecorderState(Mutex::new(None)))
         .manage(ConversationState(tokio::sync::Mutex::new(Vec::new())))
+        .setup(|app| {
+            use tauri::Manager;
+            let window = app.get_webview_window("main").unwrap();
+            if let Ok(Some(monitor)) = window.primary_monitor() {
+                let logical_w = monitor.size().width as f64 / monitor.scale_factor();
+                let x = (logical_w / 2.0 - 240.0).max(0.0);
+                window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y: 20.0 }))?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             capture_screen,

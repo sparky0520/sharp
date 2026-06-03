@@ -13,8 +13,14 @@
     "windows": [
       {
         "title": "glidewin",
-        "width": 800,
-        "height": 600
+        "width": 480,
+        "height": 80,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "decorations": false,
+        "transparent": true,
+        "visible": false
       }
     ],
     "security": {
