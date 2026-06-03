@@ -329,16 +329,25 @@ async fn run_powershell(
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
-    if !output.status.success() && !stderr.is_empty() {
-        let err = stderr.trim().to_string();
+    if !output.status.success() {
+        let err = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            // Some tools write errors to stdout and exit non-zero
+            format!("Exit code {}: {}", output.status.code().unwrap_or(-1), stdout.trim())
+        } else {
+            format!("Command failed with exit code {}", output.status.code().unwrap_or(-1))
+        };
         emit_tool_event("run_powershell", &command, "error", Some(&err));
         return Err(ToolError::ToolCallError(err.into()));
     }
 
-    let result = if stdout.trim().is_empty() {
-        "Done (no output).".to_string()
-    } else {
-        stdout.trim().to_string()
+    // Include stderr warnings alongside stdout so the agent can see them
+    let result = match (stdout.trim(), stderr.trim()) {
+        ("", "") => "Done (no output).".to_string(),
+        ("", err) => format!("(stderr) {}", err),
+        (out, "") => out.to_string(),
+        (out, err) => format!("{}\n(stderr) {}", out, err),
     };
 
     emit_tool_event("run_powershell", &command, "done", Some(&result));
