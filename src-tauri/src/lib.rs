@@ -1,4 +1,3 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use std::sync::{Arc, Mutex};
 
 #[tauri::command]
@@ -28,11 +27,8 @@ fn capture_screen() -> Result<String, String> {
 // --- Microphone Recording ---
 
 struct RecordingHandle {
-    /// Signal to stop the recording thread
     stop_signal: Arc<Mutex<bool>>,
-    /// Thread handle for the recording thread
     thread_handle: Option<std::thread::JoinHandle<Result<(), String>>>,
-    /// Path to the output WAV file
     file_path: String,
 }
 
@@ -48,20 +44,17 @@ fn start_recording(state: tauri::State<'_, RecorderState>) -> Result<String, Str
         return Err("Already recording".into());
     }
 
-    // Prepare output path
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let filename = format!("glidewin_recording_{}.wav", timestamp);
     let path = std::env::temp_dir().join(&filename);
     let file_path = path.to_string_lossy().into_owned();
 
-    // Get default input device and config
     let host = cpal::default_host();
     let device = host.default_input_device().ok_or("No microphone found")?;
     let supported_config = device.default_input_config().map_err(|e| e.to_string())?;
     let sample_rate = supported_config.sample_rate().0;
     let channels = supported_config.channels();
 
-    // Create WAV writer matching the device's native format
     let spec = hound::WavSpec {
         channels: channels,
         sample_rate: sample_rate,
@@ -73,12 +66,10 @@ fn start_recording(state: tauri::State<'_, RecorderState>) -> Result<String, Str
     let writer = Arc::new(Mutex::new(Some(writer)));
     let stop_signal = Arc::new(Mutex::new(false));
 
-    // Clone for the recording thread
     let writer_clone = writer.clone();
     let stop_clone = stop_signal.clone();
     let file_path_clone = file_path.clone();
 
-    // Spawn recording on a dedicated thread (cpal::Stream is !Send)
     let thread_handle = std::thread::spawn(move || -> Result<(), String> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -114,7 +105,6 @@ fn start_recording(state: tauri::State<'_, RecorderState>) -> Result<String, Str
                         if let Ok(mut w) = writer_for_cb.lock() {
                             if let Some(ref mut writer) = *w {
                                 for &sample in data {
-                                    // Convert f32 [-1.0, 1.0] to i16
                                     let sample_i16 = (sample * i16::MAX as f32) as i16;
                                     let _ = writer.write_sample(sample_i16);
                                 }
@@ -130,7 +120,6 @@ fn start_recording(state: tauri::State<'_, RecorderState>) -> Result<String, Str
 
         stream.play().map_err(|e| e.to_string())?;
 
-        // Wait until stop signal is set
         loop {
             std::thread::sleep(std::time::Duration::from_millis(50));
             if *stop_clone.lock().unwrap() {
@@ -138,10 +127,8 @@ fn start_recording(state: tauri::State<'_, RecorderState>) -> Result<String, Str
             }
         }
 
-        // Drop stream to stop recording
         drop(stream);
 
-        // Finalize WAV file
         if let Ok(mut w) = writer_clone.lock() {
             if let Some(writer) = w.take() {
                 writer.finalize().map_err(|e| e.to_string())?;
@@ -165,10 +152,8 @@ fn stop_recording(state: tauri::State<'_, RecorderState>) -> Result<String, Stri
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     let handle = guard.take().ok_or("Not currently recording")?;
 
-    // Signal the recording thread to stop
     *handle.stop_signal.lock().unwrap() = true;
 
-    // Wait for the thread to finish
     if let Some(thread) = handle.thread_handle {
         thread.join().map_err(|_| "Recording thread panicked".to_string())??;
     }
@@ -229,7 +214,7 @@ async fn transcribe_audio(file_path: String) -> Result<String, String> {
     Ok(text)
 }
 
-// --- GPT Integration (Streaming) ---
+// --- GPT Integration (Streaming, visual mode) ---
 
 #[tauri::command]
 async fn ask_gpt_stream(
@@ -365,6 +350,132 @@ async fn speak_text(text: String) -> Result<(), String> {
     .map_err(|e| format!("Playback error: {}", e))?
 }
 
+// --- Agentic Loop (T0009) ---
+
+use rig_derive::rig_tool;
+use rig_core::tool::ToolError;
+
+/// Execute a PowerShell command on the Windows PC and return its output.
+/// Use this to open apps, list files, get system info, run scripts, or do anything on the PC.
+#[rig_tool]
+async fn run_powershell(
+    /// The PowerShell command to run (e.g. "Get-Process", "notepad.exe", "dir C:\\")
+    command: String,
+) -> Result<String, ToolError> {
+    let output = tokio::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+        .output()
+        .await
+        .map_err(|e| ToolError::ToolCallError(e.to_string().into()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    if !output.status.success() && !stderr.is_empty() {
+        return Err(ToolError::ToolCallError(stderr.trim().to_string().into()));
+    }
+
+    Ok(if stdout.trim().is_empty() {
+        "Done (no output).".to_string()
+    } else {
+        stdout.trim().to_string()
+    })
+}
+
+/// Open an application, file, or URL on Windows using the shell's default handler.
+#[rig_tool]
+async fn open_app(
+    /// Name or path of the app/file/URL to open (e.g. "notepad", "chrome", "https://example.com", "C:\\file.txt")
+    target: String,
+) -> Result<String, ToolError> {
+    tokio::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command",
+            &format!("Start-Process '{}'", target.replace('\'', "''"))])
+        .output()
+        .await
+        .map_err(|e| ToolError::ToolCallError(e.to_string().into()))?;
+
+    Ok(format!("Opened: {}", target))
+}
+
+struct ConversationState(tokio::sync::Mutex<Vec<rig_core::completion::Message>>);
+
+#[tauri::command]
+async fn agent_chat(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ConversationState>,
+    message: String,
+    screenshot_path: Option<String>,
+) -> Result<String, String> {
+    use base64::{Engine as _, engine::general_purpose};
+    use rig_core::{
+        client::{CompletionClient, ProviderClient},
+        completion::{Chat, Message},
+        completion::message::{DocumentSourceKind, Image, ImageMediaType, Text, UserContent},
+        providers::openai,
+        OneOrMany,
+    };
+    use tauri::Emitter;
+
+    let client = openai::Client::from_env()
+        .map_err(|e| e.to_string())?;
+
+    let agent = client
+        .agent(openai::GPT_4O)
+        .preamble(
+            "You are GlideWin, an AI assistant running on the user's Windows PC. \
+             You have tools to run PowerShell commands and open applications. \
+             When helping, always tell the user what you are about to do before doing it. \
+             Keep responses concise. Never delete files or make destructive changes \
+             without explicit user confirmation.",
+        )
+        .max_tokens(2048)
+        .tool(RunPowershell)
+        .tool(OpenApp)
+        .build();
+
+    // Build the user prompt message, optionally including a screenshot
+    let user_content: OneOrMany<UserContent> = match screenshot_path {
+        Some(path) => {
+            let img_bytes = std::fs::read(&path)
+                .map_err(|e| format!("Failed to read screenshot: {}", e))?;
+            let b64 = general_purpose::STANDARD.encode(&img_bytes);
+            OneOrMany::many(vec![
+                UserContent::Image(Image {
+                    data: DocumentSourceKind::Base64(b64),
+                    media_type: Some(ImageMediaType::PNG),
+                    detail: None,
+                    additional_params: None,
+                }),
+                UserContent::Text(Text { text: message.clone(), additional_params: None }),
+            ]).map_err(|e| e.to_string())?
+        }
+        None => OneOrMany::one(UserContent::Text(Text { text: message.clone(), additional_params: None })),
+    };
+
+    let prompt_msg = Message::User { content: user_content };
+
+    let mut history = state.0.lock().await;
+
+    app.emit("agent-thinking", true).ok();
+
+    let response = agent
+        .chat(prompt_msg, &mut *history)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    app.emit("agent-thinking", false).ok();
+
+    Ok(response)
+}
+
+#[tauri::command]
+async fn clear_conversation(state: tauri::State<'_, ConversationState>) -> Result<(), String> {
+    let mut history = state.0.lock().await;
+    history.clear();
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     dotenvy::dotenv().ok();
@@ -373,7 +484,18 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(RecorderState(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![greet, capture_screen, start_recording, stop_recording, transcribe_audio, ask_gpt_stream, speak_text])
+        .manage(ConversationState(tokio::sync::Mutex::new(Vec::new())))
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            capture_screen,
+            start_recording,
+            stop_recording,
+            transcribe_audio,
+            ask_gpt_stream,
+            speak_text,
+            agent_chat,
+            clear_conversation,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

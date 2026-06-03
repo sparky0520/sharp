@@ -1,28 +1,40 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { register, unregisterAll } from '@tauri-apps/plugin-global-shortcut';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import './App.css';
 
+type ChatMessage = { role: 'user' | 'assistant'; text: string };
+
 function App() {
   const [error, setError] = useState<string | null>(null);
+
+  // Visual (screenshot) mode state
   const [screenshotPath, setScreenshotPath] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
+
+  // Recording state
   const [isRecording, setIsRecording] = useState(false);
-  const [recordingPath, setRecordingPath] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcript, setTranscript] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Visual mode (ask GPT with screenshot, streaming)
   const [isAsking, setIsAsking] = useState(false);
   const [gptResponse, setGptResponse] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Agent mode state
+  const [agentInput, setAgentInput] = useState('');
+  const [isAgentThinking, setIsAgentThinking] = useState(false);
+  const [conversation, setConversation] = useState<ChatMessage[]>([]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   const dismissWindow = async () => {
     try {
-      const appWindow = getCurrentWindow();
-      await appWindow.hide();
+      await getCurrentWindow().hide();
     } catch (e: any) {
       setError(e.toString());
     }
@@ -33,32 +45,26 @@ function App() {
       setError(null);
       setIsCapturing(true);
       setScreenshotPath(null);
-
       const appWindow = getCurrentWindow();
       await appWindow.hide();
-
       await new Promise(resolve => setTimeout(resolve, 200));
-
       const path = await invoke<string>('capture_screen');
       setScreenshotPath(path);
-
       await appWindow.show();
       await appWindow.setFocus();
     } catch (e: any) {
       setError('Capture failed: ' + e.toString());
-      const appWindow = getCurrentWindow();
-      await appWindow.show().catch(console.error);
+      await getCurrentWindow().show().catch(console.error);
     } finally {
       setIsCapturing(false);
     }
   };
 
-  const speakResponse = async () => {
-    if (!gptResponse) return;
+  const speakResponse = async (text: string) => {
     try {
       setError(null);
       setIsSpeaking(true);
-      await invoke('speak_text', { text: gptResponse });
+      await invoke('speak_text', { text });
     } catch (e: any) {
       setError('TTS failed: ' + e.toString());
     } finally {
@@ -66,6 +72,7 @@ function App() {
     }
   };
 
+  // Visual mode: screenshot + transcript → streaming GPT
   const askGpt = async () => {
     if (!screenshotPath || !transcript) return;
     setError(null);
@@ -92,6 +99,8 @@ function App() {
       setTranscript(null);
       const text = await invoke<string>('transcribe_audio', { filePath });
       setTranscript(text);
+      // Auto-fill agent input with transcript for quick agent use
+      setAgentInput(text);
     } catch (e: any) {
       setError('Transcription failed: ' + e.toString());
     } finally {
@@ -101,12 +110,9 @@ function App() {
 
   const toggleRecording = async () => {
     if (isRecording) {
-      // Stop recording
       try {
         setError(null);
         const path = await invoke<string>('stop_recording');
-        setRecordingPath(path);
-        // Auto-transcribe
         transcribeFile(path);
       } catch (e: any) {
         setError('Stop recording failed: ' + e.toString());
@@ -119,22 +125,48 @@ function App() {
         }
       }
     } else {
-      // Start recording
       try {
         setError(null);
-        setRecordingPath(null);
         setTranscript(null);
         setGptResponse(null);
         await invoke<string>('start_recording');
         setIsRecording(true);
         setElapsed(0);
-        timerRef.current = setInterval(() => {
-          setElapsed(prev => prev + 1);
-        }, 1000);
+        timerRef.current = setInterval(() => setElapsed(prev => prev + 1), 1000);
       } catch (e: any) {
         setError('Start recording failed: ' + e.toString());
       }
     }
+  };
+
+  // Agent mode: text (or transcript) + optional screenshot → rig agent with tools
+  const sendAgentMessage = async () => {
+    const msg = agentInput.trim();
+    if (!msg || isAgentThinking) return;
+
+    setAgentInput('');
+    setConversation(prev => [...prev, { role: 'user', text: msg }]);
+
+    try {
+      setError(null);
+      const response = await invoke<string>('agent_chat', {
+        message: msg,
+        screenshotPath: screenshotPath ?? null,
+      });
+      setConversation(prev => [...prev, { role: 'assistant', text: response }]);
+    } catch (e: any) {
+      setError('Agent error: ' + e.toString());
+    }
+  };
+
+  const clearConversation = async () => {
+    await invoke('clear_conversation').catch(console.error);
+    setConversation([]);
+    setScreenshotPath(null);
+    setTranscript(null);
+    setGptResponse(null);
+    setAgentInput('');
+    setError(null);
   };
 
   const formatTime = (seconds: number): string => {
@@ -143,23 +175,34 @@ function App() {
     return `${m}:${s}`;
   };
 
+  // Subscribe to agent-thinking events
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<boolean>('agent-thinking', (event) => {
+      setIsAgentThinking(event.payload);
+    }).then(fn => { unlisten = fn; });
+    return () => unlisten?.();
+  }, []);
+
+  // Scroll chat to bottom on new messages
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [conversation, isAgentThinking]);
+
+  // Global shortcut
   useEffect(() => {
     const setupShortcut = async () => {
       try {
         await unregisterAll();
         await register('CommandOrControl+Shift+Space', async (event) => {
           if (event.state === 'Pressed') {
-            try {
-              const appWindow = getCurrentWindow();
-              const isVisible = await appWindow.isVisible();
-              if (isVisible) {
-                await appWindow.hide();
-              } else {
-                await appWindow.show();
-                await appWindow.setFocus();
-              }
-            } catch (e: any) {
-              setError('Shortcut handler error: ' + e.toString());
+            const appWindow = getCurrentWindow();
+            const isVisible = await appWindow.isVisible();
+            if (isVisible) {
+              await appWindow.hide();
+            } else {
+              await appWindow.show();
+              await appWindow.setFocus();
             }
           }
         });
@@ -167,22 +210,13 @@ function App() {
         setError('Failed to register shortcut: ' + err.toString());
       }
     };
-
     setupShortcut();
-
-    return () => {
-      unregisterAll().catch(e => console.error(e));
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
-    };
+    return () => { unregisterAll().catch(console.error); };
   }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        dismissWindow();
-      }
+      if (e.key === 'Escape') dismissWindow();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
@@ -190,83 +224,123 @@ function App() {
 
   return (
     <div className="container">
-      <h1>GlideWin Assistant</h1>
-      <p>I am your desktop AI companion.</p>
-      <p>Press <code>Ctrl+Shift+Space</code> globally to toggle this window.</p>
+      <h1>GlideWin</h1>
 
-      <div style={{ margin: '1rem 0', display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
-        <button onClick={takeScreenshot} disabled={isCapturing}>
-          {isCapturing ? 'Capturing...' : 'Capture Screen'}
+      {/* ── Controls ── */}
+      <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center', flexWrap: 'wrap', margin: '0.75rem 0' }}>
+        <button onClick={takeScreenshot} disabled={isCapturing} title="Capture screen for context">
+          {isCapturing ? 'Capturing...' : screenshotPath ? 'Recapture' : 'Capture Screen'}
         </button>
-        <button
-          className={isRecording ? 'recording-btn' : ''}
-          onClick={toggleRecording}
-        >
-          {isRecording ? (
-            <>
-              <span className="recording-dot" />
-              Stop {formatTime(elapsed)}
-            </>
-          ) : (
-            'Record'
-          )}
+        <button className={isRecording ? 'recording-btn' : ''} onClick={toggleRecording}>
+          {isRecording ? <><span className="recording-dot" />Stop {formatTime(elapsed)}</> : 'Record'}
         </button>
-        <button
-          onClick={askGpt}
-          disabled={!screenshotPath || !transcript || isAsking}
-          style={{ fontWeight: 'bold' }}
-        >
-          {isAsking ? 'Asking...' : 'Ask GPT'}
+        <button onClick={askGpt} disabled={!screenshotPath || !transcript || isAsking}
+          title="Ask GPT with screenshot (streaming, visual mode)">
+          {isAsking ? 'Asking...' : 'Ask GPT (Visual)'}
         </button>
-        <button onClick={dismissWindow}>Dismiss (Esc)</button>
+        <button onClick={clearConversation} title="Clear conversation and screenshot">Clear</button>
+        <button onClick={dismissWindow}>Dismiss</button>
       </div>
 
-      {screenshotPath && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: '#333', borderRadius: '8px', color: 'white' }}>
-          <strong>Screenshot saved to:</strong><br />
-          <code style={{ wordBreak: 'break-all' }}>{screenshotPath}</code>
-        </div>
-      )}
+      {/* ── Status pills ── */}
+      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'center', marginBottom: '0.5rem' }}>
+        {screenshotPath && (
+          <span style={{ fontSize: '0.75rem', background: '#2a4a2a', color: '#7fff7f', padding: '2px 8px', borderRadius: 12 }}>
+            Screenshot ready
+          </span>
+        )}
+        {isTranscribing && (
+          <span style={{ fontSize: '0.75rem', background: '#1a1a3a', color: '#7f7fff', padding: '2px 8px', borderRadius: 12 }}>
+            <span className="transcribing-dot" /> Transcribing...
+          </span>
+        )}
+        {transcript && (
+          <span style={{ fontSize: '0.75rem', background: '#2a2a2a', color: '#aaa', padding: '2px 8px', borderRadius: 12 }}>
+            Voice: &ldquo;{transcript.slice(0, 60)}{transcript.length > 60 ? '…' : ''}&rdquo;
+          </span>
+        )}
+      </div>
 
-      {recordingPath && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: '#1a3a1a', borderRadius: '8px', color: '#7fff7f' }}>
-          <strong>Recording saved to:</strong><br />
-          <code style={{ wordBreak: 'break-all' }}>{recordingPath}</code>
-        </div>
-      )}
-
-      {isTranscribing && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: '#1a1a3a', borderRadius: '8px', color: '#7f7fff' }}>
-          <span className="transcribing-dot" /> Transcribing...
-        </div>
-      )}
-
-      {transcript && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', color: 'white', textAlign: 'left' }}>
-          <strong>Transcript:</strong>
-          <p style={{ margin: '0.5rem 0 0', lineHeight: '1.6' }}>{transcript}</p>
-        </div>
-      )}
-
-      {isAsking && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: '#1a2a1a', borderRadius: '8px', color: '#7fff7f' }}>
-          Waiting for GPT...
-        </div>
-      )}
-
+      {/* ── Visual mode response ── */}
       {gptResponse && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: '#1a1a2a', borderRadius: '8px', color: '#c8c8ff', textAlign: 'left' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <strong>GPT:</strong>
-            <button onClick={speakResponse} disabled={isSpeaking} style={{ fontSize: '0.8rem', padding: '0.25rem 0.75rem' }}>
+        <div style={{ margin: '0.5rem 0', padding: '0.75rem', background: '#1a1a2a', borderRadius: 8, color: '#c8c8ff', textAlign: 'left' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
+            <strong style={{ fontSize: '0.8rem', color: '#888' }}>GPT (visual)</strong>
+            <button onClick={() => speakResponse(gptResponse)} disabled={isSpeaking}
+              style={{ fontSize: '0.75rem', padding: '2px 8px' }}>
               {isSpeaking ? 'Speaking...' : '🔊 Speak'}
             </button>
           </div>
-          <p style={{ margin: '0.5rem 0 0', lineHeight: '1.7', whiteSpace: 'pre-wrap' }}>{gptResponse}</p>
+          <p style={{ margin: 0, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{gptResponse}</p>
         </div>
       )}
 
-      {error && <div style={{ color: 'red', marginTop: '1rem' }}><strong>Error:</strong> {error}</div>}
+      {/* ── Agent conversation ── */}
+      {conversation.length > 0 && (
+        <div style={{ maxHeight: 320, overflowY: 'auto', margin: '0.5rem 0', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          {conversation.map((msg, i) => (
+            <div key={i} style={{
+              padding: '0.5rem 0.75rem',
+              borderRadius: 8,
+              textAlign: 'left',
+              background: msg.role === 'user' ? '#2a2a2a' : '#1a2a1a',
+              color: msg.role === 'user' ? '#ddd' : '#7fff7f',
+              alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+              maxWidth: '90%',
+            }}>
+              <div style={{ fontSize: '0.7rem', color: '#888', marginBottom: '0.2rem' }}>
+                {msg.role === 'user' ? 'You' : 'GlideWin'}
+              </div>
+              <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{msg.text}</div>
+              {msg.role === 'assistant' && (
+                <button onClick={() => speakResponse(msg.text)} disabled={isSpeaking}
+                  style={{ fontSize: '0.7rem', padding: '2px 6px', marginTop: '0.3rem' }}>
+                  {isSpeaking ? '...' : '🔊'}
+                </button>
+              )}
+            </div>
+          ))}
+          {isAgentThinking && (
+            <div style={{ padding: '0.5rem 0.75rem', borderRadius: 8, background: '#1a2a1a', color: '#7fff7f', alignSelf: 'flex-start', fontSize: '0.85rem' }}>
+              <span className="transcribing-dot" /> Thinking...
+            </div>
+          )}
+          <div ref={chatEndRef} />
+        </div>
+      )}
+
+      {/* ── Agent input ── */}
+      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+        <input
+          type="text"
+          value={agentInput}
+          onChange={e => setAgentInput(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && sendAgentMessage()}
+          placeholder={screenshotPath ? 'Ask about screen or give a command...' : 'Give a command or ask anything...'}
+          disabled={isAgentThinking}
+          style={{
+            flex: 1,
+            padding: '0.5rem 0.75rem',
+            borderRadius: 8,
+            border: '1px solid #555',
+            background: '#1a1a1a',
+            color: '#fff',
+            fontSize: '0.9rem',
+          }}
+        />
+        <button
+          onClick={sendAgentMessage}
+          disabled={!agentInput.trim() || isAgentThinking}
+          style={{ padding: '0.5rem 1rem', fontWeight: 'bold' }}
+        >
+          {isAgentThinking ? '...' : 'Send'}
+        </button>
+      </div>
+      <div style={{ fontSize: '0.7rem', color: '#666', marginTop: '0.25rem', textAlign: 'left' }}>
+        Agent has tools: run PowerShell · open apps{screenshotPath ? ' · screen context attached' : ''}
+      </div>
+
+      {error && <div style={{ color: 'red', marginTop: '0.75rem' }}><strong>Error:</strong> {error}</div>}
     </div>
   );
 }
