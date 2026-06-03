@@ -430,6 +430,7 @@ async fn agent_chat(
              without explicit user confirmation.",
         )
         .max_tokens(2048)
+        .default_max_turns(10)
         .tool(RunPowershell)
         .tool(OpenApp)
         .build();
