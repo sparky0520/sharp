@@ -327,7 +327,7 @@ async fn speak_text(text: String) -> Result<(), String> {
             "model": "tts-1",
             "input": text,
             "voice": "alloy",
-            "response_format": "wav"
+            "response_format": "mp3"
         }))
         .send()
         .await
