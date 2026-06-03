@@ -44,8 +44,11 @@ function App() {
   const [isSpeaking, setIsSpeaking]           = useState(false);
   const [lastResponse, setLastResponse]       = useState<string | null>(null);
   const [activeToolCalls, setActiveToolCalls] = useState<ToolCallEntry[]>([]);
+  const [hasScreenshot, setHasScreenshot]     = useState(false);
   const pendingToolCallsRef                   = useRef<ToolCallEntry[]>([]);
   const timerRef                              = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Ref so sendToAgent always reads the latest path regardless of render cycle
+  const screenshotRef                         = useRef<string | null>(null);
 
   // Derived widget state — order matters: higher priority first
   const widgetState: WidgetState =
@@ -85,7 +88,7 @@ function App() {
       setError(null);
       const response = await invoke<string>('agent_chat', {
         message: msg,
-        screenshotPath: null, // T0011 will wire up auto-capture
+        screenshotPath: screenshotRef.current,
       });
       const toolCalls = [...pendingToolCallsRef.current];
       pendingToolCallsRef.current = [];
@@ -169,6 +172,16 @@ function App() {
     return () => unlisten?.();
   }, []);
 
+  // Store screenshot path from hotkey activation
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<string>('activate', event => {
+      screenshotRef.current = event.payload || null;
+      setHasScreenshot(!!event.payload);
+    }).then(fn => { unlisten = fn; });
+    return () => unlisten?.();
+  }, []);
+
   // Keyboard: Escape = dismiss, Space = toggle recording
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -202,8 +215,9 @@ function App() {
     '';
 
   const hintLine =
-    widgetState === 'idle'      ? 'Space to record  ·  Esc to dismiss' :
-    widgetState === 'listening' ? 'Space to stop  ·  Esc to dismiss'   :
+    widgetState === 'idle' && hasScreenshot ? 'Screenshot ready  ·  Space to speak  ·  Esc to dismiss' :
+    widgetState === 'idle'                  ? 'Space to record  ·  Esc to dismiss'                      :
+    widgetState === 'listening'             ? 'Space to stop  ·  Esc to dismiss'                        :
     'Esc to dismiss';
 
   const dotClass =

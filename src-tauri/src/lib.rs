@@ -1,12 +1,14 @@
 use std::sync::{Arc, Mutex};
 
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+// Exclude the widget window from screen captures so xcap never sees it.
+// WDA_EXCLUDEFROMCAPTURE (0x11) requires Windows 10 v2004+.
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+extern "system" {
+    fn SetWindowDisplayAffinity(hwnd: *mut std::ffi::c_void, affinity: u32) -> i32;
 }
 
-#[tauri::command]
-fn capture_screen() -> Result<String, String> {
+fn do_capture_screen() -> Result<String, String> {
     use xcap::Monitor;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,10 +17,19 @@ fn capture_screen() -> Result<String, String> {
     let image = monitor.capture_image().map_err(|e| e.to_string())?;
 
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let filename = format!("glidewin_capture_{}.png", timestamp);
-    let path = std::env::temp_dir().join(filename);
+    let path = std::env::temp_dir().join(format!("glidewin_capture_{}.png", timestamp));
     image.save(&path).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn greet(name: &str) -> String {
+    format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+#[tauri::command]
+fn capture_screen() -> Result<String, String> {
+    do_capture_screen()
 }
 
 // --- Microphone Recording ---
@@ -508,6 +519,13 @@ pub fn run() {
                 window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y: 20.0 }))?;
             }
 
+            // Exclude widget from screen captures so screenshots never contain it
+            #[cfg(target_os = "windows")]
+            if let Ok(hwnd) = window.hwnd() {
+                const WDA_EXCLUDEFROMCAPTURE: u32 = 0x00000011;
+                unsafe { SetWindowDisplayAffinity(hwnd.0, WDA_EXCLUDEFROMCAPTURE); }
+            }
+
             // Register Ctrl+Shift+Space once at the Rust level so React lifecycle
             // (StrictMode double-mount, hot-reload) can never cause "already registered" errors.
             let handle = app.handle().clone();
@@ -515,12 +533,21 @@ pub fn run() {
                 if event.state() != ShortcutState::Pressed { return; }
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
+                    use tauri::Emitter;
                     if let Some(win) = handle.get_webview_window("main") {
                         if win.is_visible().unwrap_or(false) {
                             let _ = win.hide();
                         } else {
+                            // Widget is excluded from capture via WDA_EXCLUDEFROMCAPTURE —
+                            // capture immediately, no hide/sleep needed.
+                            let path = tokio::task::spawn_blocking(do_capture_screen)
+                                .await
+                                .ok()
+                                .and_then(|r| r.ok())
+                                .unwrap_or_default();
                             let _ = win.show();
                             let _ = win.set_focus();
+                            let _ = win.emit("activate", path);
                         }
                     }
                 });
