@@ -312,6 +312,59 @@ async fn ask_gpt_stream(
     Ok(())
 }
 
+// --- Text-to-Speech ---
+
+#[tauri::command]
+async fn speak_text(text: String) -> Result<(), String> {
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .map_err(|_| "OPENAI_API_KEY environment variable not set".to_string())?;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post("https://api.openai.com/v1/audio/speech")
+        .bearer_auth(&api_key)
+        .json(&serde_json::json!({
+            "model": "tts-1",
+            "input": text,
+            "voice": "alloy",
+            "response_format": "wav"
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("TTS request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("TTS API error ({}): {}", status, body));
+    }
+
+    let audio_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read audio: {}", e))?
+        .to_vec();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        use rodio::{Decoder, OutputStream, Sink};
+        use std::io::Cursor;
+
+        let (_stream, stream_handle) = OutputStream::try_default()
+            .map_err(|e| format!("Audio output error: {}", e))?;
+        let sink = Sink::try_new(&stream_handle)
+            .map_err(|e| format!("Sink error: {}", e))?;
+
+        let source = Decoder::new(Cursor::new(audio_bytes))
+            .map_err(|e| format!("Decode error: {}", e))?;
+
+        sink.append(source);
+        sink.sleep_until_end();
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Playback error: {}", e))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     dotenvy::dotenv().ok();
@@ -320,7 +373,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(RecorderState(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![greet, capture_screen, start_recording, stop_recording, transcribe_audio, ask_gpt_stream])
+        .invoke_handler(tauri::generate_handler![greet, capture_screen, start_recording, stop_recording, transcribe_audio, ask_gpt_stream, speak_text])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -16,6 +16,7 @@ function App() {
   const [transcript, setTranscript] = useState<string | null>(null);
   const [isAsking, setIsAsking] = useState(false);
   const [gptResponse, setGptResponse] = useState<string | null>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const dismissWindow = async () => {
@@ -49,6 +50,19 @@ function App() {
       await appWindow.show().catch(console.error);
     } finally {
       setIsCapturing(false);
+    }
+  };
+
+  const speakResponse = async () => {
+    if (!gptResponse) return;
+    try {
+      setError(null);
+      setIsSpeaking(true);
+      await invoke('speak_text', { text: gptResponse });
+    } catch (e: any) {
+      setError('TTS failed: ' + e.toString());
+    } finally {
+      setIsSpeaking(false);
     }
   };
 
@@ -242,7 +256,12 @@ function App() {
 
       {gptResponse && (
         <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: '#1a1a2a', borderRadius: '8px', color: '#c8c8ff', textAlign: 'left' }}>
-          <strong>GPT:</strong>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <strong>GPT:</strong>
+            <button onClick={speakResponse} disabled={isSpeaking} style={{ fontSize: '0.8rem', padding: '0.25rem 0.75rem' }}>
+              {isSpeaking ? 'Speaking...' : '🔊 Speak'}
+            </button>
+          </div>
           <p style={{ margin: '0.5rem 0 0', lineHeight: '1.7', whiteSpace: 'pre-wrap' }}>{gptResponse}</p>
         </div>
       )}
