@@ -598,13 +598,8 @@ fn strip_html_tags(html: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-// --- Agentic Loop (T0009) ---
+// --- Agentic Loop ---
 
-use rig_derive::rig_tool;
-use rig_core::tool::ToolError;
-
-// Carries the AppHandle into tool functions via tokio task-local storage.
-// Tools run in the same task as agent_chat, so try_with succeeds.
 tokio::task_local! {
     static TOOL_APP_HANDLE: tauri::AppHandle;
 }
@@ -620,13 +615,9 @@ fn emit_tool_event(tool: &str, input: &str, status: &str, output: Option<&str>) 
     }).ok();
 }
 
-/// Execute a PowerShell command on the Windows PC and return its output.
-/// Use this to open apps, list files, get system info, run scripts, or automate anything on the PC.
-#[rig_tool]
-async fn run_powershell(
-    /// The PowerShell command to run (e.g. "Get-Process", "notepad.exe", "dir C:\\Users")
-    command: String,
-) -> Result<String, ToolError> {
+// ── Tool implementations ──────────────────────────────────────────────────────
+
+async fn tool_run_powershell(command: String) -> Result<String, String> {
     emit_tool_event("run_powershell", &command, "start", None);
 
     let output = tokio::process::Command::new("powershell")
@@ -638,7 +629,7 @@ async fn run_powershell(
         Ok(o) => o,
         Err(e) => {
             emit_tool_event("run_powershell", &command, "error", Some(&e.to_string()));
-            return Err(ToolError::ToolCallError(e.to_string().into()));
+            return Err(e.to_string());
         }
     };
 
@@ -649,16 +640,14 @@ async fn run_powershell(
         let err = if !stderr.trim().is_empty() {
             stderr.trim().to_string()
         } else if !stdout.trim().is_empty() {
-            // Some tools write errors to stdout and exit non-zero
             format!("Exit code {}: {}", output.status.code().unwrap_or(-1), stdout.trim())
         } else {
             format!("Command failed with exit code {}", output.status.code().unwrap_or(-1))
         };
         emit_tool_event("run_powershell", &command, "error", Some(&err));
-        return Err(ToolError::ToolCallError(err.into()));
+        return Err(err);
     }
 
-    // Include stderr warnings alongside stdout so the agent can see them
     let result = match (stdout.trim(), stderr.trim()) {
         ("", "") => "Done (no output).".to_string(),
         ("", err) => format!("(stderr) {}", err),
@@ -670,28 +659,13 @@ async fn run_powershell(
     Ok(result)
 }
 
-/// Open an application or URL on Windows using the shell `start` command.
-/// Always prefer this over run_powershell for launching apps or websites.
-#[rig_tool]
-async fn open_app(
-    /// Application to open. Use the shell name exactly as you would type it at a command prompt:
-    /// "chrome", "msedge", "firefox", "notepad", "explorer", "spotify", "code", etc.
-    /// For a URL with no specific browser, pass "https://..." here and leave url empty.
-    app: String,
-    /// Optional URL to open with the app, e.g. "https://youtube.com".
-    /// Leave empty when just launching an app without a URL.
-    url: String,
-) -> Result<String, ToolError> {
+async fn tool_open_app(app: String, url: String) -> Result<String, String> {
     let label = if url.is_empty() { app.clone() } else { format!("{} {}", app, url) };
     emit_tool_event("open_app", &label, "start", None);
 
-    // Build `cmd /c start "" <app> [url]` with each token as a separate argument
-    // so the shell never misreads a URL as a window title.
     let mut cmd = tokio::process::Command::new("cmd");
     cmd.args(["/c", "start", "", &app]);
-    if !url.is_empty() {
-        cmd.arg(&url);
-    }
+    if !url.is_empty() { cmd.arg(&url); }
 
     match cmd.output().await {
         Ok(out) => {
@@ -699,7 +673,7 @@ async fn open_app(
             if !out.status.success() && !stderr.trim().is_empty() {
                 let err = stderr.trim().to_string();
                 emit_tool_event("open_app", &label, "error", Some(&err));
-                return Err(ToolError::ToolCallError(err.into()));
+                return Err(err);
             }
             let msg = format!("Opened: {}", label);
             emit_tool_event("open_app", &label, "done", Some(&msg));
@@ -707,14 +681,12 @@ async fn open_app(
         }
         Err(e) => {
             emit_tool_event("open_app", &label, "error", Some(&e.to_string()));
-            Err(ToolError::ToolCallError(e.to_string().into()))
+            Err(e.to_string())
         }
     }
 }
 
-/// List all saved skills with their names and descriptions.
-#[rig_tool]
-async fn list_skills() -> Result<String, ToolError> {
+async fn tool_list_skills() -> Result<String, String> {
     emit_tool_event("list_skills", "", "start", None);
     let dir = skills_dir();
     let mut skills = Vec::new();
@@ -735,61 +707,32 @@ async fn list_skills() -> Result<String, ToolError> {
             }
         }
     }
-    let result = if skills.is_empty() {
-        "No skills saved yet.".to_string()
-    } else {
-        skills.join("\n")
-    };
+    let result = if skills.is_empty() { "No skills saved yet.".to_string() } else { skills.join("\n") };
     emit_tool_event("list_skills", "", "done", Some(&result));
     Ok(result)
 }
 
-/// Save a reusable PowerShell procedure as a named skill for future use.
-#[rig_tool]
-async fn create_skill(
-    /// Short identifier for the skill, no spaces (e.g. "get_battery")
-    name: String,
-    /// One-sentence description of what the skill does
-    description: String,
-    /// JSON array of parameter names the skill accepts, e.g. ["query"] or []
-    parameters: String,
-    /// PowerShell script for the skill. Reference parameters as $paramname variables.
-    powershell_code: String,
-) -> Result<String, ToolError> {
+async fn tool_create_skill(name: String, description: String, parameters: String, powershell_code: String) -> Result<String, String> {
     emit_tool_event("create_skill", &name, "start", None);
-
     let params: Vec<String> = serde_json::from_str(&parameters).unwrap_or_default();
     let skill = SkillDef { name: name.clone(), description, parameters: params, powershell_code };
     let path = skills_dir().join(format!("{}.json", name));
-    let json = serde_json::to_string_pretty(&skill)
-        .map_err(|e| ToolError::ToolCallError(e.to_string().into()))?;
-    std::fs::write(&path, json)
-        .map_err(|e| ToolError::ToolCallError(e.to_string().into()))?;
-
+    let json = serde_json::to_string_pretty(&skill).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
     let msg = format!("Skill '{}' saved.", name);
     emit_tool_event("create_skill", &name, "done", Some(&msg));
     Ok(msg)
 }
 
-/// Run a saved skill by name, passing parameters as a JSON object.
-#[rig_tool]
-async fn use_skill(
-    /// The skill name to run
-    name: String,
-    /// Parameters as a JSON object, e.g. {"query": "hello"} or {}
-    params: String,
-) -> Result<String, ToolError> {
+async fn tool_use_skill(name: String, params: String) -> Result<String, String> {
     emit_tool_event("use_skill", &name, "start", None);
-
     let path = skills_dir().join(format!("{}.json", name));
     let content = std::fs::read_to_string(&path)
-        .map_err(|_| ToolError::ToolCallError(format!("Skill '{}' not found.", name).into()))?;
-    let skill: SkillDef = serde_json::from_str(&content)
-        .map_err(|e| ToolError::ToolCallError(e.to_string().into()))?;
+        .map_err(|_| format!("Skill '{}' not found.", name))?;
+    let skill: SkillDef = serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
     let param_map: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&params).unwrap_or_default();
-
     let mut preamble = String::new();
     for (k, v) in &param_map {
         let val = match v {
@@ -803,118 +746,365 @@ async fn use_skill(
     }
 
     let full_command = format!("{}{}", preamble, skill.powershell_code);
-
     let output = tokio::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &full_command])
-        .output()
-        .await
-        .map_err(|e| ToolError::ToolCallError(e.to_string().into()))?;
+        .output().await.map_err(|e| e.to_string())?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
     if !output.status.success() {
-        let err = if !stderr.trim().is_empty() {
-            stderr.trim().to_string()
-        } else {
-            stdout.trim().to_string()
-        };
+        let err = if !stderr.trim().is_empty() { stderr.trim().to_string() } else { stdout.trim().to_string() };
         emit_tool_event("use_skill", &name, "error", Some(&err));
-        return Err(ToolError::ToolCallError(err.into()));
+        return Err(err);
     }
-
     let result = match (stdout.trim(), stderr.trim()) {
         ("", "") => "Done (no output).".to_string(),
         ("", err) => format!("(stderr) {}", err),
         (out, "") => out.to_string(),
         (out, err) => format!("{}\n(stderr) {}", out, err),
     };
-
     emit_tool_event("use_skill", &name, "done", Some(&result));
     Ok(result)
 }
 
-/// Fetch the plain-text content of a web page.
-#[rig_tool]
-async fn web_fetch(
-    /// The URL to fetch
-    url: String,
-) -> Result<String, ToolError> {
+async fn tool_web_fetch(url: String) -> Result<String, String> {
     emit_tool_event("web_fetch", &url, "start", None);
-
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-        .build()
-        .map_err(|e| ToolError::ToolCallError(e.to_string().into()))?;
-
-    let html = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| ToolError::ToolCallError(e.to_string().into()))?
-        .text()
-        .await
-        .map_err(|e| ToolError::ToolCallError(e.to_string().into()))?;
-
+        .build().map_err(|e| e.to_string())?;
+    let html = client.get(&url).send().await.map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())?;
     let text = strip_html_tags(&html);
     let truncated = if text.len() > 3000 {
-        format!("{}... [truncated — {} chars remaining. Call web_fetch again on a more specific URL if you need more.]", &text[..3000], text.len() - 3000)
-    } else {
-        text
-    };
-
+        format!("{}... [truncated — {} chars remaining]", &text[..3000], text.len() - 3000)
+    } else { text };
     emit_tool_event("web_fetch", &url, "done", Some(&format!("{} chars", truncated.len())));
     Ok(truncated)
 }
 
-/// Search the web and return top results with titles, URLs, and descriptions.
-#[rig_tool]
-async fn web_search(
-    /// The search query
-    query: String,
-) -> Result<String, ToolError> {
+async fn tool_web_search(query: String) -> Result<String, String> {
     emit_tool_event("web_search", &query, "start", None);
-
-    let api_key = std::env::var("BRAVE_API_KEY").map_err(|_| {
-        ToolError::ToolCallError(
-            "BRAVE_API_KEY not set. Add it to .env to enable web search.".into(),
-        )
-    })?;
-
+    let api_key = std::env::var("BRAVE_API_KEY")
+        .map_err(|_| "BRAVE_API_KEY not set. Add it to .env to enable web search.".to_string())?;
     let client = reqwest::Client::new();
     let resp = client
         .get("https://api.search.brave.com/res/v1/web/search")
         .query(&[("q", query.as_str()), ("count", "5")])
         .header("Accept", "application/json")
         .header("X-Subscription-Token", api_key)
-        .send()
-        .await
-        .map_err(|e| ToolError::ToolCallError(e.to_string().into()))?;
-
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| ToolError::ToolCallError(e.to_string().into()))?;
-
-    let results = json["web"]["results"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .enumerate()
-                .map(|(i, r)| {
-                    let title = r["title"].as_str().unwrap_or("(no title)");
-                    let url = r["url"].as_str().unwrap_or("");
-                    let desc = r["description"].as_str().unwrap_or("");
-                    format!("{}. {} ({})\n   {}", i + 1, title, url, desc)
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        })
+        .send().await.map_err(|e| e.to_string())?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let results = json["web"]["results"].as_array()
+        .map(|arr| arr.iter().enumerate().map(|(i, r)| {
+            format!("{}. {} ({})\n   {}", i + 1,
+                r["title"].as_str().unwrap_or("(no title)"),
+                r["url"].as_str().unwrap_or(""),
+                r["description"].as_str().unwrap_or(""))
+        }).collect::<Vec<_>>().join("\n\n"))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "No results found.".to_string());
-
     emit_tool_event("web_search", &query, "done", Some(&results));
     Ok(results)
+}
+
+// ── GUI Control Tools ─────────────────────────────────────────────────────────
+
+async fn tool_mouse_click(x: i32, y: i32, button: String) -> Result<String, String> {
+    let label = format!("{} click at ({}, {})", button, x, y);
+    emit_tool_event("mouse_click", &label, "start", None);
+    let result = tokio::task::spawn_blocking(move || {
+        use enigo::{Enigo, Mouse, Settings, Button, Direction, Coordinate};
+        let mut e = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+        e.move_mouse(x, y, Coordinate::Abs).map_err(|e| e.to_string())?;
+        let btn = match button.to_lowercase().as_str() {
+            "right" => Button::Right,
+            "middle" => Button::Middle,
+            _ => Button::Left,
+        };
+        e.button(btn, Direction::Click).map_err(|e| e.to_string())?;
+        Ok::<String, String>(format!("Clicked at ({}, {})", x, y))
+    }).await.map_err(|e| e.to_string())?;
+    match &result {
+        Ok(r) => emit_tool_event("mouse_click", &label, "done", Some(r)),
+        Err(e) => emit_tool_event("mouse_click", &label, "error", Some(e)),
+    }
+    result
+}
+
+async fn tool_mouse_move(x: i32, y: i32) -> Result<String, String> {
+    let label = format!("({}, {})", x, y);
+    emit_tool_event("mouse_move", &label, "start", None);
+    let result = tokio::task::spawn_blocking(move || {
+        use enigo::{Enigo, Mouse, Settings, Coordinate};
+        let mut e = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+        e.move_mouse(x, y, Coordinate::Abs).map_err(|e| e.to_string())?;
+        Ok::<String, String>(format!("Mouse moved to ({}, {})", x, y))
+    }).await.map_err(|e| e.to_string())?;
+    match &result {
+        Ok(r) => emit_tool_event("mouse_move", &label, "done", Some(r)),
+        Err(e) => emit_tool_event("mouse_move", &label, "error", Some(e)),
+    }
+    result
+}
+
+async fn tool_type_text(text: String) -> Result<String, String> {
+    let preview = if text.len() > 40 { format!("{}…", &text[..40]) } else { text.clone() };
+    emit_tool_event("type_text", &preview, "start", None);
+    let text_clone = text.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        use enigo::{Enigo, Keyboard, Settings};
+        let mut e = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+        e.text(&text_clone).map_err(|e| e.to_string())?;
+        Ok::<String, String>(format!("Typed {} chars", text_clone.len()))
+    }).await.map_err(|e| e.to_string())?;
+    match &result {
+        Ok(r) => emit_tool_event("type_text", &preview, "done", Some(r)),
+        Err(e) => emit_tool_event("type_text", &preview, "error", Some(e)),
+    }
+    result
+}
+
+fn parse_enigo_key(s: &str) -> enigo::Key {
+    use enigo::Key;
+    match s.to_lowercase().as_str() {
+        "enter" | "return" => Key::Return,
+        "esc" | "escape"   => Key::Escape,
+        "tab"              => Key::Tab,
+        "space"            => Key::Space,
+        "backspace"        => Key::Backspace,
+        "delete" | "del"   => Key::Delete,
+        "up"               => Key::UpArrow,
+        "down"             => Key::DownArrow,
+        "left"             => Key::LeftArrow,
+        "right"            => Key::RightArrow,
+        "home"             => Key::Home,
+        "end"              => Key::End,
+        "pageup"  | "pgup" => Key::PageUp,
+        "pagedown"| "pgdn" | "pgdown" => Key::PageDown,
+        "f1"  => Key::F1,  "f2"  => Key::F2,  "f3"  => Key::F3,  "f4"  => Key::F4,
+        "f5"  => Key::F5,  "f6"  => Key::F6,  "f7"  => Key::F7,  "f8"  => Key::F8,
+        "f9"  => Key::F9,  "f10" => Key::F10, "f11" => Key::F11, "f12" => Key::F12,
+        c if c.len() == 1  => Key::Unicode(c.chars().next().unwrap()),
+        _                  => Key::Unicode(' '),
+    }
+}
+
+async fn tool_key_combo(keys: String) -> Result<String, String> {
+    emit_tool_event("key_combo", &keys, "start", None);
+    let keys_clone = keys.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        use enigo::{Enigo, Keyboard, Settings, Key, Direction};
+        let mut e = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+        let parts: Vec<String> = keys_clone.split('+').map(|s| s.trim().to_lowercase()).collect();
+        let (modifiers, main) = parts.split_at(parts.len().saturating_sub(1));
+
+        for m in modifiers {
+            let k = match m.as_str() {
+                "ctrl" | "control" => Key::Control,
+                "shift" => Key::Shift,
+                "alt"   => Key::Alt,
+                "win" | "super" | "meta" | "cmd" => Key::Meta,
+                _ => continue,
+            };
+            e.key(k, Direction::Press).map_err(|e| e.to_string())?;
+        }
+        if let Some(k) = main.first() {
+            e.key(parse_enigo_key(k.as_str()), Direction::Click).map_err(|e| e.to_string())?;
+        }
+        for m in modifiers.iter().rev() {
+            let k = match m.as_str() {
+                "ctrl" | "control" => Key::Control,
+                "shift" => Key::Shift,
+                "alt"   => Key::Alt,
+                "win" | "super" | "meta" | "cmd" => Key::Meta,
+                _ => continue,
+            };
+            e.key(k, Direction::Release).map_err(|e| e.to_string())?;
+        }
+        Ok::<String, String>(format!("Pressed: {}", keys_clone))
+    }).await.map_err(|e| e.to_string())?;
+    match &result {
+        Ok(r) => emit_tool_event("key_combo", &keys, "done", Some(r)),
+        Err(e) => emit_tool_event("key_combo", &keys, "error", Some(e)),
+    }
+    result
+}
+
+async fn tool_take_screenshot() -> Result<String, String> {
+    emit_tool_event("take_screenshot", "", "start", None);
+    let path = tokio::task::spawn_blocking(do_capture_screen)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e)?;
+    emit_tool_event("take_screenshot", "", "done", Some("Screen captured."));
+    Ok(path)
+}
+
+// ── Tool dispatch & schemas ───────────────────────────────────────────────────
+
+enum ToolResult {
+    Text(String),
+    Screenshot(String),
+}
+
+async fn dispatch_tool(name: &str, args: &serde_json::Value) -> ToolResult {
+    let s = |key: &str| args[key].as_str().unwrap_or("").to_string();
+    let i = |key: &str| args[key].as_i64().unwrap_or(0) as i32;
+
+    if name == "take_screenshot" {
+        return match tool_take_screenshot().await {
+            Ok(path) => ToolResult::Screenshot(path),
+            Err(e)   => ToolResult::Text(format!("Screenshot failed: {}", e)),
+        };
+    }
+
+    let result: Result<String, String> = match name {
+        "run_powershell" => tool_run_powershell(s("command")).await,
+        "open_app"       => tool_open_app(s("app"), s("url")).await,
+        "list_skills"    => tool_list_skills().await,
+        "create_skill"   => tool_create_skill(s("name"), s("description"), s("parameters"), s("powershell_code")).await,
+        "use_skill"      => tool_use_skill(s("name"), s("params")).await,
+        "web_search"     => tool_web_search(s("query")).await,
+        "web_fetch"      => tool_web_fetch(s("url")).await,
+        "mouse_click"    => tool_mouse_click(i("x"), i("y"), s("button")).await,
+        "mouse_move"     => tool_mouse_move(i("x"), i("y")).await,
+        "type_text"      => tool_type_text(s("text")).await,
+        "key_combo"      => tool_key_combo(s("keys")).await,
+        _                => Err(format!("Unknown tool: {}", name)),
+    };
+
+    ToolResult::Text(result.unwrap_or_else(|e| format!("Error: {}", e)))
+}
+
+fn tool_schemas() -> serde_json::Value {
+    serde_json::json!([
+        {"type":"function","function":{"name":"run_powershell","description":"Execute a PowerShell command for system info, file ops, or automation. Use open_app for launching apps.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+        {"type":"function","function":{"name":"open_app","description":"Open an app or URL. App only: app='chrome', url=''. URL in browser: app='chrome', url='https://...'. Default browser: app='https://...', url=''.","parameters":{"type":"object","properties":{"app":{"type":"string"},"url":{"type":"string"}},"required":["app","url"]}}},
+        {"type":"function","function":{"name":"list_skills","description":"List all saved reusable skills.","parameters":{"type":"object","properties":{}}}},
+        {"type":"function","function":{"name":"create_skill","description":"Save a reusable PowerShell procedure as a named skill. Use $paramname variables. Call this whenever you solve a task likely to be repeated.","parameters":{"type":"object","properties":{"name":{"type":"string","description":"Short id, no spaces"},"description":{"type":"string"},"parameters":{"type":"string","description":"JSON array e.g. [\"query\"] or []"},"powershell_code":{"type":"string"}},"required":["name","description","parameters","powershell_code"]}}},
+        {"type":"function","function":{"name":"use_skill","description":"Run a saved skill by name.","parameters":{"type":"object","properties":{"name":{"type":"string"},"params":{"type":"string","description":"JSON object e.g. {} or {\"query\":\"hello\"}"}},"required":["name","params"]}}},
+        {"type":"function","function":{"name":"web_search","description":"Search the web. Use this first — snippets are usually enough. Only use web_fetch to read a full page.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
+        {"type":"function","function":{"name":"web_fetch","description":"Fetch plain text from a URL, capped at 3000 chars. Only call when you need a full page (docs, code, articles).","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}},
+        {"type":"function","function":{"name":"mouse_click","description":"Click at absolute screen coordinates. Call take_screenshot first if you need to locate the target.","parameters":{"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"button":{"type":"string","enum":["left","right","middle"]}},"required":["x","y","button"]}}},
+        {"type":"function","function":{"name":"mouse_move","description":"Move the mouse without clicking.","parameters":{"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]}}},
+        {"type":"function","function":{"name":"type_text","description":"Type text at the current cursor position. Focus the target field first.","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}},
+        {"type":"function","function":{"name":"key_combo","description":"Press a key or combination: 'ctrl+c', 'alt+f4', 'win+d', 'enter', 'escape', 'ctrl+shift+t'.","parameters":{"type":"object","properties":{"keys":{"type":"string"}},"required":["keys"]}}},
+        {"type":"function","function":{"name":"take_screenshot","description":"Capture a fresh screenshot to see current screen state. Call after clicking or typing to verify the result.","parameters":{"type":"object","properties":{}}}}
+    ])
+}
+
+// ── OpenAI completion & agent loop ───────────────────────────────────────────
+
+async fn call_openai(
+    api_key: &str,
+    system_prompt: &str,
+    messages: &[serde_json::Value],
+    tools: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut all_messages = vec![serde_json::json!({"role":"system","content":system_prompt})];
+    all_messages.extend_from_slice(messages);
+
+    let body = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": all_messages,
+        "tools": tools,
+        "max_tokens": 2048,
+    });
+
+    let resp = reqwest::Client::new()
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(api_key)
+        .json(&body)
+        .send().await.map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("OpenAI error ({}): {}", status, body));
+    }
+
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+const SYSTEM_PROMPT: &str = "\
+You are GlideWin, a voice-controlled AI assistant on the user's Windows PC. \
+You see a screenshot of the screen at the start of each conversation.\n\
+SYSTEM TOOLS: run_powershell for commands; open_app for apps/URLs. \
+Always prefer open_app over run_powershell for launching applications.\n\
+WEB TOOLS: Always use web_search first — snippets are usually sufficient. \
+Only call web_fetch when you genuinely need to read a full page. web_fetch is capped at 3000 chars.\n\
+SKILL SYSTEM: Use list_skills to see saved skills, use_skill to run one, create_skill to save a new one. \
+Create a skill whenever you solve a task likely to be repeated.\n\
+GUI CONTROL: You can control the mouse and keyboard. \
+Focus the target window/field before typing (mouse_click or run_powershell AppActivate). \
+After clicking or typing, call take_screenshot to verify the result before continuing.\n\
+Always tell the user what you are about to do before calling a tool. \
+Keep responses concise. Never delete files or make destructive changes without explicit confirmation.";
+
+async fn run_agent_loop(
+    api_key: &str,
+    history: &mut Vec<serde_json::Value>,
+    tools: &serde_json::Value,
+    max_turns: u32,
+) -> Result<String, String> {
+    use base64::{Engine as _, engine::general_purpose};
+
+    for _ in 0..max_turns {
+        let resp = call_openai(api_key, SYSTEM_PROMPT, history, tools).await?;
+
+        let choice = resp["choices"][0].clone();
+        let msg = choice["message"].clone();
+        let finish = choice["finish_reason"].as_str().unwrap_or("stop");
+
+        history.push(msg.clone());
+
+        if finish == "stop" || finish == "end_turn" {
+            return Ok(msg["content"].as_str().unwrap_or("").to_string());
+        }
+
+        if finish == "tool_calls" {
+            let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
+            let mut screenshot_paths: Vec<String> = Vec::new();
+
+            for call in &calls {
+                let call_id  = call["id"].as_str().unwrap_or("");
+                let name     = call["function"]["name"].as_str().unwrap_or("");
+                let args_str = call["function"]["arguments"].as_str().unwrap_or("{}");
+                let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
+
+                let tool_msg = match dispatch_tool(name, &args).await {
+                    // image_url is not valid inside tool-role messages; collect paths and
+                    // inject the screenshots as user messages after all tool results.
+                    ToolResult::Screenshot(path) => {
+                        screenshot_paths.push(path);
+                        serde_json::json!({"role":"tool","tool_call_id":call_id,"content":"Screenshot captured."})
+                    }
+                    ToolResult::Text(text) => serde_json::json!({"role":"tool","tool_call_id":call_id,"content":text}),
+                };
+                history.push(tool_msg);
+            }
+
+            // Inject each screenshot as a user message so the model can see the image.
+            for path in screenshot_paths {
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let b64 = general_purpose::STANDARD.encode(&bytes);
+                        history.push(serde_json::json!({
+                            "role": "user",
+                            "content": [
+                                {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{}",b64),"detail":"auto"}},
+                                {"type":"text","text":"Current screen state. Continue based on what you see."}
+                            ]
+                        }));
+                    }
+                    Err(e) => {
+                        history.push(serde_json::json!({"role":"user","content":format!("Screenshot read error: {}",e)}));
+                    }
+                }
+            }
+        }
+    }
+
+    Err("Max turns reached".to_string())
 }
 
 // ── Conversation History ──────────────────────────────────────────────────────
@@ -1026,7 +1216,7 @@ fn read_screenshot(path: String) -> Result<String, String> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct ConversationState(tokio::sync::Mutex<Vec<rig_core::completion::Message>>);
+struct ConversationState(tokio::sync::Mutex<Vec<serde_json::Value>>);
 
 #[tauri::command]
 async fn agent_chat(
@@ -1036,92 +1226,39 @@ async fn agent_chat(
     screenshot_path: Option<String>,
 ) -> Result<String, String> {
     use base64::{Engine as _, engine::general_purpose};
-    use rig_core::{
-        client::{CompletionClient, ProviderClient},
-        completion::{Chat, Message},
-        completion::message::{DocumentSourceKind, Image, ImageMediaType, Text, UserContent},
-        providers::openai,
-        OneOrMany,
-    };
     use tauri::Emitter;
 
-    let client = openai::Client::from_env().map_err(|e| e.to_string())?;
+    let api_key = std::env::var("OPENAI_API_KEY").map_err(|e| e.to_string())?;
+    let tools = tool_schemas();
 
-    let agent = client
-        .agent(openai::GPT_4O)
-        .preamble(
-            "You are GlideWin, an AI assistant running on the user's Windows PC. \
-             \
-             SYSTEM TOOLS: run_powershell for one-off commands; open_app for launching apps or \
-             websites. To open an app: app=\"chrome\", url=\"\". To open a URL in a specific \
-             browser: app=\"chrome\", url=\"https://...\". To open a URL in the default browser: \
-             app=\"https://...\" and url=\"\". Always prefer open_app over run_powershell for \
-             launching applications. \
-             \
-             WEB TOOLS: Always use web_search first — its title and snippet results are usually \
-             sufficient. Only call web_fetch when you genuinely need to read the full content of \
-             a specific page (e.g. documentation, a tutorial, or code). web_fetch is capped at \
-             3000 chars and will tell you if content was truncated. \
-             \
-             SKILL SYSTEM: Skills are saved, reusable PowerShell procedures. \
-             Use list_skills to see what's available. \
-             Use use_skill to run a skill by name with a JSON params object. \
-             Use create_skill to save a new reusable procedure — do this whenever you solve a \
-             task that is likely to be repeated. Skills use $paramname PowerShell variables. \
-             \
-             Always tell the user what you are about to do before calling a tool. \
-             Keep responses concise. Never delete files or make destructive changes \
-             without explicit user confirmation.",
-        )
-        .max_tokens(2048)
-        .default_max_turns(10)
-        .tool(RunPowershell)
-        .tool(OpenApp)
-        .tool(ListSkills)
-        .tool(CreateSkill)
-        .tool(UseSkill)
-        .tool(WebFetch)
-        .tool(WebSearch)
-        .build();
-
-    let user_content: OneOrMany<UserContent> = match screenshot_path {
-        Some(path) => {
-            let img_bytes = std::fs::read(&path)
-                .map_err(|e| format!("Failed to read screenshot: {}", e))?;
-            let b64 = general_purpose::STANDARD.encode(&img_bytes);
-            OneOrMany::many(vec![
-                UserContent::Image(Image {
-                    data: DocumentSourceKind::Base64(b64),
-                    media_type: Some(ImageMediaType::PNG),
-                    detail: None,
-                    additional_params: None,
-                }),
-                UserContent::Text(Text { text: message.clone(), additional_params: None }),
-            ]).map_err(|e| e.to_string())?
-        }
-        None => OneOrMany::one(UserContent::Text(Text { text: message.clone(), additional_params: None })),
+    let user_content = if let Some(ref path) = screenshot_path {
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("Failed to read screenshot: {}", e))?;
+        let b64 = general_purpose::STANDARD.encode(&bytes);
+        serde_json::json!([
+            {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{}",b64),"detail":"low"}},
+            {"type":"text","text":message}
+        ])
+    } else {
+        serde_json::json!(message)
     };
 
-    let prompt_msg = Message::User { content: user_content };
-
-    // Clone history so we don't hold the mutex across the API call
     let mut history = state.0.lock().await.clone();
+    history.push(serde_json::json!({"role":"user","content":user_content}));
 
     app.emit("agent-thinking", true).ok();
 
-    // Run the agent inside the task-local scope so tools can emit events
-    let (response_result, updated_history) = TOOL_APP_HANDLE
+    let result = TOOL_APP_HANDLE
         .scope(app.clone(), async move {
-            let resp = agent.chat(prompt_msg, &mut history).await;
-            (resp, history)
+            run_agent_loop(&api_key, &mut history, &tools, 10)
+                .await
+                .map(|response| (response, history))
         })
         .await;
 
     app.emit("agent-thinking", false).ok();
 
-    let response = response_result.map_err(|e| e.to_string())?;
-
-    // Persist the updated history
+    let (response, updated_history) = result?;
     *state.0.lock().await = updated_history;
 
     Ok(response)
