@@ -1761,29 +1761,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glidewin"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "cpal",
- "dirs 5.0.1",
- "dotenvy",
- "enigo",
- "futures-util",
- "hound",
- "reqwest 0.12.28",
- "rodio",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-opener",
- "tokio",
- "xcap",
-]
-
-[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4352,6 +4329,29 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "sharp"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cpal",
+ "dirs 5.0.1",
+ "dotenvy",
+ "enigo",
+ "futures-util",
+ "hound",
+ "reqwest 0.12.28",
+ "rodio",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-opener",
+ "tokio",
+ "xcap",
 ]
 
 [[package]]

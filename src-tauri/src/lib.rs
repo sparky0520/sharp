@@ -34,7 +34,7 @@ fn do_capture_screen() -> Result<String, String> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let path = std::env::temp_dir().join(format!("glidewin_capture_{}.png", timestamp));
+    let path = std::env::temp_dir().join(format!("sharp_capture_{}.png", timestamp));
     image.save(&path).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
 }
@@ -133,7 +133,7 @@ fn start_recording(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let path = std::env::temp_dir().join(format!("glidewin_recording_{}.wav", timestamp));
+    let path = std::env::temp_dir().join(format!("sharp_recording_{}.wav", timestamp));
 
     let host = cpal::default_host();
     let device = host.default_input_device().ok_or("No microphone found")?;
@@ -1344,7 +1344,7 @@ struct HistoryState(tokio::sync::Mutex<Vec<ConversationRecord>>);
 
 fn history_file_path() -> PathBuf {
     let base = dirs::data_dir().unwrap_or_else(|| std::env::temp_dir());
-    base.join("glidewin").join("history.json")
+    base.join("sharp").join("history.json")
 }
 
 fn load_history_from_disk() -> Vec<ConversationRecord> {

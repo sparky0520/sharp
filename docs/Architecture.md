@@ -51,7 +51,7 @@ hotkey press
 
 ## Storage
 
-Conversations stored in `{app_data}/glidewin/history.json` — array of last 20 entries, each:
+Conversations stored in `{app_data}/sharp/history.json` — array of last 20 entries, each:
 
 ```json
 {

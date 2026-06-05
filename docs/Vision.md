@@ -6,7 +6,7 @@ Build a Windows-native AI desktop companion inspired by Glide.
 
 ### Core Experience
 
-Press **Ctrl+Shift+Space** → glidewin instantly captures your screen and starts listening. Speak your question or command. When you stop talking, the agent runs and speaks the answer back. Zero manual steps.
+Press **Ctrl+Shift+Space** → sharp instantly captures your screen and starts listening. Speak your question or command. When you stop talking, the agent runs and speaks the answer back. Zero manual steps.
 
 ### MVP Features
 
