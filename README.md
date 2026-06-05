@@ -4,7 +4,7 @@ I got the inspiration from [clicky by Farza](https://x.com/heyclicky) and frustr
 
 Sharp is your personal assistant which has access to the terminal, the web and can assist in mundane tasks.
 
-## Shortcuts 
+## Shortcuts
 
 - CTRL + SHIFT + SPACE to toggle sharp
 - CTRL + SHIFT + H to show history panel

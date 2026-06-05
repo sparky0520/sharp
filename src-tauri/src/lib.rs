@@ -2,14 +2,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-// Exclude the widget window from screen captures so xcap never sees it.
-// WDA_EXCLUDEFROMCAPTURE (0x11) requires Windows 10 v2004+.
-#[cfg(target_os = "windows")]
-#[link(name = "user32")]
-extern "system" {
-    fn SetWindowDisplayAffinity(hwnd: *mut std::ffi::c_void, affinity: u32) -> i32;
-}
-
 // DWMWA_CAPTION_COLOR (35) sets the title-bar background; requires Windows 11 Build 22000+.
 #[cfg(target_os = "windows")]
 #[link(name = "dwmapi")]
@@ -1510,14 +1502,6 @@ pub fn run() {
                 }))?;
             }
 
-            // Exclude widget from screen captures so screenshots never contain it
-            #[cfg(target_os = "windows")]
-            if let Ok(hwnd) = window.hwnd() {
-                const WDA_EXCLUDEFROMCAPTURE: u32 = 0x00000011;
-                unsafe {
-                    SetWindowDisplayAffinity(hwnd.0, WDA_EXCLUDEFROMCAPTURE);
-                }
-            }
 
             // Create history window (hidden; shown via Ctrl+Shift+H or the widget button)
             let history_win = tauri::WebviewWindowBuilder::new(
@@ -1567,8 +1551,6 @@ pub fn run() {
                             if win.is_visible().unwrap_or(false) {
                                 let _ = win.hide();
                             } else {
-                                // Widget is excluded from capture via WDA_EXCLUDEFROMCAPTURE —
-                                // capture immediately, no hide/sleep needed.
                                 let path = tokio::task::spawn_blocking(do_capture_screen)
                                     .await
                                     .ok()
