@@ -1,4 +1,4 @@
-# Project: GlideWin
+# Project: Sharp
 
 ## Goal
 

@@ -1,4 +1,4 @@
-# GlideWin Rules
+# Sharp Rules
 
 This project is a Windows AI desktop companion.
 

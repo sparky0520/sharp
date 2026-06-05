@@ -601,7 +601,7 @@ async fn speak_text(text: String) -> Result<(), String> {
 
 fn skills_dir() -> PathBuf {
     let mut p = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    p.push("GlideWin");
+    p.push("Sharp");
     p.push("skills");
     std::fs::create_dir_all(&p).ok();
     p
@@ -1164,10 +1164,12 @@ fn tool_schemas() -> serde_json::Value {
 // ── OpenAI completion & agent loop ───────────────────────────────────────────
 
 fn strip_images(messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    messages.iter().map(|msg| {
-        match msg["content"].as_array() {
+    messages
+        .iter()
+        .map(|msg| match msg["content"].as_array() {
             Some(parts) => {
-                let text_only: Vec<serde_json::Value> = parts.iter()
+                let text_only: Vec<serde_json::Value> = parts
+                    .iter()
                     .filter(|p| p["type"].as_str() != Some("image_url"))
                     .cloned()
                     .collect();
@@ -1180,8 +1182,8 @@ fn strip_images(messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
                 m
             }
             None => msg.clone(),
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 async fn call_openai(
@@ -1218,7 +1220,7 @@ async fn call_openai(
 }
 
 const SYSTEM_PROMPT: &str = "\
-You are GlideWin, a voice-controlled AI assistant on the user's Windows PC.\n\
+You are Sharp, a voice-controlled AI assistant on the user's Windows PC.\n\
 For GUI tasks, take a screenshot after each step to confirm the result before continuing. \
 Only call think if something unexpected happens and you need to recover.\n\
 APPS: Always prefer the installed desktop app over a website (e.g. open Spotify, not spotify.com). \
@@ -1516,14 +1518,13 @@ pub fn run() {
                 }))?;
             }
 
-
             // Create history window (hidden; shown via Ctrl+Shift+H or the widget button)
             let history_win = tauri::WebviewWindowBuilder::new(
                 app,
                 "history",
                 tauri::WebviewUrl::App("index.html".into()),
             )
-            .title("GlideWin — History")
+            .title("Sharp — History")
             .inner_size(1200.0, 800.0)
             .resizable(true)
             .skip_taskbar(false)

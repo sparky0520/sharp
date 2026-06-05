@@ -1,4 +1,4 @@
-# GlideWin Architecture
+# Sharp Architecture
 
 ## Activation Flow
 
